@@ -1,25 +1,42 @@
 #!/bin/bash
 
-# Configuration variables
-mt5file='/config/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe'
-WINEPREFIX='/config/.wine'
+# ─── Configuration XDG pour PyXDG / Openbox (évite les warnings) ───
+export XDG_RUNTIME_DIR=/tmp/.xdg-runtime
+mkdir -p "$XDG_RUNTIME_DIR"
+echo "[ℹ] XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
+
+set -euo pipefail
+
+# ─── Affichage sur KasmVNC ───
+export DISPLAY=:1
+echo "[ℹ] DISPLAY=$DISPLAY"
+
+# ─── Préfixe Wine ───
+export WINEPREFIX=/config/.wine
+mkdir -p "$WINEPREFIX"
+chown "$(id -u):$(id -g)" "$WINEPREFIX"
+echo "[ℹ] WINEPREFIX=$WINEPREFIX"
+
+
+
+# Variables
+
+WINEPREFIX="/config/.wine"
 wine_executable="wine"
-mt5server_port="8001"
-mono_url="https://dl.winehq.org/wine/wine-mono/8.0.0/wine-mono-8.0.0-x86.msi"
+mt5file="$WINEPREFIX/drive_c/Program Files/MetaTrader 5/terminal64.exe"
+python_wine_url="https://www.python.org/ftp/python/3.9.13/python-3.9.13-amd64.exe"
+mt5_url="https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
+bot_requirements="/app//bot_requirements.txt"
+bot="/app//main.py"
+PYTHON_WIN_DIR="$WINEPREFIX/drive_c/Program Files/Python39"
+PYTHON_WIN_EXE="$PYTHON_WIN_DIR/python.exe"
 gecko_url="https://dl.winehq.org/wine/wine-gecko/2.47.4/wine-gecko-2.47.4-x86.msi"
-python_wine_url="https://www.python.org/ftp/python/3.13.0/python-3.13.0.exe"
+mono_url="https://dl.winehq.org/wine/wine-mono/8.0.0/wine-mono-8.0.0-x86.msi"
 
-log() {
-    echo "[MT5 Docker] $1"
-}
+log() { echo "[MT5 Docker] $1"; }
 
-# Check if xvfb-run is installed
-if ! command -v xvfb-run &>/dev/null; then
-    log "[⚠] ERROR: 'xvfb-run' not found. Please install 'xvfb' via apt in your Dockerfile."
-    exit 1
-fi
 
-# 1. Installation de Mono
+# 1. Installer Mono et Gecko si besoin
 if [ ! -e "$WINEPREFIX/drive_c/windows/mono" ]; then
     log "[1/7] Installing Mono..."
     mkdir -p "$(dirname "$WINEPREFIX/drive_c/mono.msi")"
@@ -30,7 +47,7 @@ else
     log "[1/7] Mono already installed."
 fi
 
-# 1.5 Installation de Gecko
+## 1.5 Installation de Gecko
 if [ ! -d "$WINEPREFIX/drive_c/windows/gecko" ]; then
     log "[1.5/7] Installing Gecko..."
     curl -o "$WINEPREFIX/drive_c/gecko.msi" "$gecko_url"
@@ -40,78 +57,80 @@ else
     log "[1.5/7] Gecko already installed."
 fi
 
-# 2. Installation de MetaTrader 5
+# 2. Installer MetaTrader 5 sous Wine
 if [ ! -e "$mt5file" ]; then
-    log "[2/7] Downloading and installing MetaTrader 5..."
+    log "Downloading and installing MetaTrader 5..."
     $wine_executable reg add "HKEY_CURRENT_USER\\Software\\Wine" /v Version /t REG_SZ /d "win10" /f
-    curl -o "$WINEPREFIX/drive_c/mt5setup.exe" "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
+    curl -o "$WINEPREFIX/drive_c/mt5setup.exe" "$mt5_url"
     xvfb-run --auto-servernum $wine_executable "$WINEPREFIX/drive_c/mt5setup.exe" "/auto"
-    sleep 5
+    sleep 10
     rm -f "$WINEPREFIX/drive_c/mt5setup.exe"
 else
-    log "[2/7] MetaTrader 5 already installed."
+    log "MetaTrader 5 already installed."
 fi
 
-# 3. Démarrage de MetaTrader
+# 3. Installer Python 3.9 sous Wine
+if [ ! -e "$PYTHON_WIN_EXE" ]; then
+    log "Downloading and installing Python 3.9 in Wine..."
+    curl -L "$python_wine_url" -o /tmp/python39-installer.exe
+    $wine_executable /tmp/python39-installer.exe /quiet InstallAllUsers=1 PrependPath=1
+    rm -f /tmp/python39-installer.exe
+else
+    log "Python 3.9 already installed in Wine."
+fi
+
+# 4. Installer les dépendances Python sous Wine (MetaTrader5, requirements.txt)
+log "Upgrading pip in Python 3.9 under Wine..."
+$wine_executable "$PYTHON_WIN_EXE" -m ensurepip
+$wine_executable "$PYTHON_WIN_EXE" -m pip install --upgrade pip
+log "Installing MetaTrader5 Python module..."
+$wine_executable "$PYTHON_WIN_EXE" -m pip install MetaTrader5
+
+if [ -f "$bot_requirements" ]; then
+    log "Installing requirements from $bot_requirements..."
+    $wine_executable "$PYTHON_WIN_EXE" -m pip install -r "Z:$bot_requirements"
+fi
+
+# 5. Lancer le terminal MT5 (en background, important pour l'API !)
 if [ -e "$mt5file" ]; then
-    log "[3/7] Starting MetaTrader 5..."
-    xvfb-run --auto-servernum $wine_executable "$mt5file" &
+    log "Starting MetaTrader 5 terminal..."
+
+    # Lancement MT5 en arrière-plan
+    $wine_executable "$mt5file" &
+    MT5_PID=$!
+
+    # Attente de l'ouverture du port RPyC (8001) ou jusqu'à 30 s max
+    log "Waiting for MetaTrader 5 RPyC service on port 8001…"
+    ATTEMPTS=0
+    until nc -z localhost 8001; do
+        if [ "$ATTEMPTS" -ge 10 ]; then
+            log "[ERROR] MT5 RPyC service did not start within expected time."
+            exit 1
+        fi
+        ATTEMPTS=$((ATTEMPTS+1))
+        sleep 3
+    done
+    log "MT5 RPyC service is up (port 8001)."
 else
-    log "[3/7] ERROR: MetaTrader 5 not found, skipping execution."
+    log "[ERROR] MetaTrader 5 not found, aborting."
+    exit 1
 fi
 
-# 4. Installer Python sous Wine
-if ! $wine_executable python --version &>/dev/null; then
-    log "[4/7] Installing Python in Wine..."
-    curl -L "$python_wine_url" -o /tmp/python-installer.exe
-    $wine_executable /tmp/python-installer.exe /quiet InstallAllUsers=1 PrependPath=1
-    rm -f /tmp/python-installer.exe
-else
-    log "[4/7] Python already installed in Wine."
-fi
-
-# 5. Installer mt5linux dans Wine
-log "[5/7] Installing Python packages in Wine..."
-$wine_executable python -m pip install --upgrade pip
-$wine_executable python -m pip install MetaTrader5 pymt5linux
+# 6. Lancer le bot Python (dans le même Wineprefix, via Wine, avec chemin Z:) Ouvrir le terminal pour contrôler le bot
+log "Opening interactive Wine terminal for manual bot launch..."
+    # wineconsole ouvrira une fenêtre cmd.exe attachée à votre DISPLAY VNC/X
+    $wine_executable wineconsole --backend=user cmd &
+    log "User terminal opened. Vous pouvez lancer votre bot manuellement ici."
 
 
-# 6. Côté Linux : créer un environnement Python virtuel
-log "[6/7] Installing required Python packages on Linux..."
-$wine_executable python -m pymt5linux --host 127.0.0.1 --port "$mt5server_port" python.exe &
+#if [ -f "$bot" ]; then
+#    log "Launching trading bot..."
+#    $wine_executable "$PYTHON_WIN_EXE" "Z:$bot" &  # Lancer le bot en arrière-plan
+#else
+#    log "[ERROR] Bot script $bot not found!"
+#    exit 1
+#fi
 
-# Créer le venv si nécessaire
-if [ ! -d "/app/balize_env" ]; then
-    log "[6.1] Creating Python virtual environment in /app/balize_env..."
-    python3 -m venv /app/balize_env
-fi
-
-# Définir le bon interpréteur
-LINUX_PYTHON="/app/balize_env/bin/python"
-
-# Installer les dépendances
-$LINUX_PYTHON -m pip install --upgrade pip
-$LINUX_PYTHON -m pip install pymt5linux pyxdg rpyc
-
-#installer dépendances pour faire fonctionner le bot
-$LINUX_PYTHON -m pip install -r /app/bot_requirements.txt
-
-# 7. Lancer le serveur mt5linux
-log "[7/7] Starting mt5linux server on port $mt5server_port..."
-$LINUX_PYTHON -m mt5linux --host 0.0.0.0 -p "$mt5server_port" -w "$wine_executable" python.exe &
-
-sleep 5
-if ss -tuln | grep ":$mt5server_port" &>/dev/null; then
-    log "[✔] mt5linux server is running on port $mt5server_port."
-else
-    log "[✖] Failed to start mt5linux server on port $mt5server_port."
-fi
-
-log "[Info] Wine version: $(wine --version)"
-log "[Info] Python (Linux): $($LINUX_PYTHON --version)"
-log "[Info] Python (Wine): $($wine_executable python --version)"
-
-# 8. Lancer le bot
-log "[8/7] Launching trading bot..."
-
-$LINUX_PYTHON /app/main.py
+# 7. Démarrer KasmVNC (noVNC, VNC, Xvfb)
+echo "[ℹ] Démarrage de la stack KasmVNC (noVNC, VNC, Xvfb)…"
+exec /init
