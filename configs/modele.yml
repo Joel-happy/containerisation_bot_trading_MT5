@@ -1,0 +1,6 @@
+# Configuration MT5 - Instance 1
+account_id: 000000000
+password: "VOTRE_MOT_DE_PASSE_ICI"
+server: "NomDuServeurMT5"
+symbol: "XAUUSD"
+volume: 2.0
