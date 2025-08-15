@@ -1,0 +1,27 @@
+services:
+  mt5_c1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment: [PUID=911, PGID=911, TZ=Europe/Paris]
+    ports: ["3100:3000","8100:8001" ]         # VNC A
+    volumes: ["mt5_a:/config"]
+
+  mt5_c2:
+    build:
+      context: .
+    environment: [PUID=911, PGID=911, TZ=Europe/Paris]
+    ports: ["3200:3000","8200:8001"]         # VNC B
+    volumes: ["mt5_b:/config"]
+
+  mt5_c3:
+    build:
+      context: .
+    environment: [PUID=911, PGID=911, TZ=Europe/Paris]
+    ports: ["3300:3000","8300:8001"]         # VNC C
+    volumes: ["mt5_c:/config"]
+
+volumes:
+  mt5_a: {}
+  mt5_b: {}
+  mt5_c: {}
